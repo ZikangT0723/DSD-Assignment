@@ -2,7 +2,7 @@
 
 ## 1. Assignment requirements
 
-The implementation follows the attached UGEA2353 assignment guideline:
+Requirements checked against the lecturer's **UGEA2353 DSD Assignment 2026June.pdf** (three pages):
 
 - Language: Verilog or SystemVerilog; this solution uses SystemVerilog.
 - Parking capacity: maximum 10 vehicles.
@@ -14,7 +14,7 @@ The implementation follows the attached UGEA2353 assignment guideline:
 
 ## 2. Design architecture
 
-The design follows the lecture's hierarchical and FSM coding practices:
+The design uses a hierarchical implementation with separate FSM logic:
 
 1. `parking_fsm_controller` contains a state register, combinational next-state logic, and Moore output logic.
 2. `vehicle_counter` maintains a saturating occupancy count from 0 through 10 and produces the full/empty flags.
@@ -25,15 +25,17 @@ Sequential blocks use `always_ff` with nonblocking assignments. Combinational bl
 
 ## 3. Operational assumptions
 
-- `reset` is active-high and asynchronous, as specified in the assignment.
+- The assignment requires an asynchronous reset; active-high polarity is a design choice.
 - A ticket is sampled in `CHECK_ENTRY`; payment is sampled in `CHECK_EXIT`.
-- Sensors may be deasserted after the controller enters the corresponding check state.
+- Sensors are synchronous request levels and may be deasserted after the controller enters the corresponding check state. Requests asserted only while the FSM is busy are not queued. A sensor held high on a later visit to `IDLE` is treated as another request. Physical sensor synchronization, debounce, and one-request-per-vehicle conditioning are outside this assignment model.
 - Entrance and exit gates open for one FSM state/cycle.
-- Occupancy changes once in `UPDATE_ENTRY` or `UPDATE_EXIT`.
+- In `UPDATE_ENTRY` or `UPDATE_EXIT`, the FSM asserts the counter enable and `display_update`. Occupancy changes once at the rising edge **leaving** that state, when the FSM returns to `IDLE`. The full/available indicators then follow the new count.
 - An invalid ticket, incomplete payment, or an exit request while empty enters `ERROR` for one cycle and raises `alarm`.
 - An entry request while full enters `PARKING_FULL` for one cycle, keeps the entrance gate closed, and raises `alarm`.
-- If `car_in` and `car_out` are asserted simultaneously, exit has priority. This deterministic safety policy avoids opening both barriers together and is tested in TC9.
+- If `car_in` and `car_out` are asserted simultaneously, exit has priority. This arbitration choice avoids opening both barriers together and is tested in TC9. The entry request is not queued: it must remain asserted or be retried when the controller returns to `IDLE`. An empty-lot or unpaid exit still takes priority and produces `ERROR`; there is no automatic fallback to entry.
 - The counter saturates at 0 and 10, so invalid requests cannot cause underflow or overflow.
+
+The PDF does not prescribe reset polarity, arbitration, request queuing, gate-open duration, or exact display-update timing. These are implementation assumptions, not additional lecturer requirements. Here `display_update` is an update-request strobe, not a registered indication that the updated count is already available. A future clocked display register would need to account for that timing.
 
 ## 4. FSM state/transition summary
 
@@ -82,10 +84,12 @@ The self-checking `tb_smart_parking.sv` verifies:
 8. TC8 - A vehicle attempts to exit while the parking lot is empty.
 9. TC9 - Simultaneous entry and exit, using the documented exit-priority policy.
 10. TC10 - Invalid ticket.
-11. TC11 - Asynchronous reset during operation.
+11. TC11 - Asynchronous reset while the entry gate is open, starting with two vehicles; verifies immediate counter clearing and no delayed entry after release.
 12. TC12 - Continuous valid entry/exit traffic.
 
-The testbench generates `smart_parking.vcd`, performs automatic checks, prints a pass/fail summary, and calls `$fatal` if any check fails.
+Additional checks cover an unpaid exit from an occupied lot, a successful paid retry, and asynchronous reset while an exit update is pending. A continuous monitor checks state/count range, unknown values, gate exclusivity and state decoding, alarm/display strobes, and full/available indications after each rising edge. Directed checks verify count and one-cycle control timing. These are simulation checks, not exhaustive formal verification; a two-state simulator cannot establish four-state X/Z behavior.
+
+The testbench generates `smart_parking.vcd`, tracks completion of all 12 required scenarios, prints a pass/fail summary, and calls `$fatal` if any check fails. A watchdog aborts a stalled run. The pass count counts individual assertions, not test cases.
 
 ## 6. Running in EDA Playground
 
@@ -95,7 +99,17 @@ The testbench generates `smart_parking.vcd`, performs automatic checks, prints a
 4. Put `tb_smart_parking.sv` in the Testbench pane.
 5. Enable **Open EPWave after run**.
 6. Run the simulation and confirm the console reports `ALL 12 REQUIRED FUNCTIONAL TEST CASES PASSED`.
-7. Add these signals to EPWave: `clk`, `reset`, all six inputs, all six outputs, `dut.state_debug`, and `dut.occupancy_count`.
+7. Add all six inputs, all six outputs, `dut.state_debug`, and `dut.occupancy_count` to EPWave. The six inputs already include `clk` and `reset`.
+
+Local regression with Verilator (C++ compiler and make required):
+
+```sh
+verilator --binary --timing --trace --top-module tb_smart_parking \
+  --Mdir /tmp/dsd-build -Wno-fatal smart_parking_design.sv tb_smart_parking.sv
+/tmp/dsd-build/Vtb_smart_parking
+```
+
+Review compiler warnings as well as the simulation summary. Local simulation supplements the PDF's required **EDA Playground** run; include EDA Playground/EPWave evidence in the submitted report.
 
 ## 7. Waveform discussion checklist
 
@@ -109,8 +123,48 @@ For each test case, discuss:
 - the one-cycle `display_update` pulse; and
 - the timing relationship between clock edges, state changes, gate operation, and counter updates.
 
-## 8. Files
+For an accepted entry with initial occupancy `N`, values after successive rising edges are:
+
+| Edge | State | `gate_in` | `display_update` | Occupancy |
+|---|---|---:|---:|---:|
+| Request sampled | `CHECK_ENTRY` | 0 | 0 | N |
+| Ticket accepted | `OPEN_ENTRY_GATE` | 1 | 0 | N |
+| Gate cycle ends | `UPDATE_ENTRY` | 0 | 1 | N |
+| Update committed | `IDLE` | 0 | 0 | N + 1 |
+
+An accepted exit follows the same timing using exit states and `N - 1`. Reset can interrupt either sequence between clock edges.
+
+## 8. Report requirements still to complete
+
+The PDF also requires simulation in EDA Playground, waveform explanations, and evaluation of **testability and sustainable design considerations**. The code and a passing console summary alone do not complete the report.
+
+- System specification/problem analysis (10 marks): describe the campus-parking problem, interfaces, capacity, and the assumptions above.
+- FSM design (30 marks): provide a state diagram, transition/output table, arbitration rationale, and error/reset behavior.
+- RTL design (30 marks): explain the four synthesizable modules and their connections.
+- Testbench development (20 marks): map TC1-TC12 to stimulus and expected results, and discuss controllability through inputs/reset and observability through outputs, occupancy, and state debug signals.
+- Simulation/waveform analysis (10 marks): provide EDA Playground results and annotated waveforms with the seven explanations listed on page 3 of the PDF.
+- Discuss sustainable design qualitatively: the small counter, event-driven occupancy updates, and simple control logic limit hardware needs. Do not claim measured power or energy savings without synthesis/activity-based measurements. Gate motors and physical sensor power are outside this RTL simulation.
+
+The stated submission deadline is **5:00 pm, Friday, 18 September 2026**, by email to the lecturer. No report submission is performed by this repository workflow.
+
+## 9. Files
 
 - `smart_parking_design.sv`: all four synthesizable modules.
 - `tb_smart_parking.sv`: self-checking testbench for the 12 required cases.
 - `assignment_guideline.md`: requirements, assumptions, FSM summary, and simulation instructions.
+
+## 10. Review and local verification record (8 September 2026)
+
+Baseline reviewed: commit `edb529987a6199b4a1a0a6b4abf907e96295f79c`.
+
+| Check | Result |
+|---|---|
+| Required interfaces, four modules, nine states, capacity and asynchronous reset | Present in RTL; no functional RTL change identified by this review |
+| Original testbench, local Verilator simulation | 178 individual checks passed, 0 failed |
+| Strengthened testbench, local Verilator simulation | 280 individual checks passed, 0 failed; all TC1-TC12 completed |
+| Continuous control/indicator/range monitor | 154 clock samples, no violations |
+| Compiler diagnostics | Two existing `WIDTHEXPAND` warnings: the unsigned 4-bit count is extended for comparison with the 32-bit capacity parameter; correct for the configured capacity of 10 |
+| EDA Playground simulation and report waveforms | Still required; not executed as part of this local review |
+| Synthesis, physical timing and power measurements | Not performed |
+
+The RTL is unchanged. Changes strengthen verification and distinguish lecturer requirements from implementation assumptions. Simulation success establishes the exercised cases, not exhaustive correctness or a guaranteed assignment mark.
